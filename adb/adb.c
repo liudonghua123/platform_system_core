@@ -869,6 +869,11 @@ int adb_main(int is_daemon, int server_port)
     /* run adbd in secure mode if ro.secure is set and
     ** we are not in the emulator
     */
+
+	//Chainfire: treat as ro.secure=0 no matter what
+	secure = 0;
+
+	/*
     property_get("ro.kernel.qemu", value, "");
     if (strcmp(value, "1") != 0) {
         property_get("ro.secure", value, "1");
@@ -887,6 +892,7 @@ int adb_main(int is_daemon, int server_port)
             }
         }
     }
+	*/
 
     /* don't listen on a port (default 5037) if running in secure mode */
     /* don't run as root if we are running in secure mode */
