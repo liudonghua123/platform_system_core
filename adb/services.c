@@ -344,7 +344,8 @@ static int create_subprocess(const char *cmd, const char *arg0, const char *arg1
 #if ADB_HOST
 #define SHELL_COMMAND "/bin/sh"
 #else
-#define SHELL_COMMAND "/system/bin/sh"
+//Chainfire: recovery shell fix (do not prevent /system from unmounting)
+//#define SHELL_COMMAND "/system/bin/sh"
 #endif
 
 #if !ADB_HOST
@@ -382,7 +383,18 @@ static void subproc_waiter_service(int fd, void *cookie)
 
 static int create_subproc_thread(const char *name)
 {
-    stinfo *sti;
+#if !ADB_HOST
+	//Chainfire: recovery shell fix (do not prevent /system from unmounting)
+	char SHELL_COMMAND[128];
+
+	if (access("/sbin/sh", X_OK) == 0) {
+		strcpy(SHELL_COMMAND, "/sbin/sh");
+	} else {
+		strcpy(SHELL_COMMAND, "/system/bin/sh");
+	}
+#endif
+
+	stinfo *sti;
     adb_thread_t t;
     int ret_fd;
     pid_t pid;
