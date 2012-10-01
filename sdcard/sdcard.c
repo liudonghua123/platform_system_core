@@ -43,7 +43,7 @@
  * usage:  sdcard <path> <uid> <gid>
  *
  * It must be run as root, but will change to uid/gid as soon as it
- * mounts a filesystem on /mnt/sdcard.  It will refuse to run if uid or
+ * mounts a filesystem on /storage/sdcard.  It will refuse to run if uid or
  * gid are zero.
  *
  *
@@ -70,7 +70,7 @@
 
 #define FUSE_UNKNOWN_INO 0xffffffff
 
-#define MOUNT_POINT "/mnt/sdcard"
+#define MOUNT_POINT "/storage/sdcard0"
 
 struct handle {
     struct node *node;
@@ -114,9 +114,6 @@ struct fuse {
     struct node root;
     char rootpath[1024];
 };
-
-static unsigned uid = -1;
-static unsigned gid = -1;
 
 #define PATH_BUFFER_SIZE 1024
 
@@ -912,7 +909,7 @@ void handle_fuse_request(struct fuse *fuse, struct fuse_in_header *hdr, void *da
         out.major = FUSE_KERNEL_VERSION;
         out.minor = FUSE_KERNEL_MINOR_VERSION;
         out.max_readahead = req->max_readahead;
-        out.flags = FUSE_ATOMIC_O_TRUNC;
+        out.flags = FUSE_ATOMIC_O_TRUNC | FUSE_BIG_WRITES;
         out.max_background = 32;
         out.congestion_threshold = 32;
         out.max_write = 256 * 1024;
@@ -941,7 +938,7 @@ void handle_fuse_requests(struct fuse *fuse)
     int len;
     
     for (;;) {
-        len = read(fuse->fd, req, 8192);
+        len = read(fuse->fd, req, sizeof(req));
         if (len < 0) {
             if (errno == EINTR)
                 continue;
@@ -954,7 +951,7 @@ void handle_fuse_requests(struct fuse *fuse)
 
 static int usage()
 {
-    ERROR("usage: sdcard [-l -f] <path> <uid> <gid>\n\n\t-l force file names to lower case when creating new files\n\t-f fix up file system before starting (repairs bad file name case and group ownership)\n");
+    ERROR("usage: sdcard <path> <uid> <gid>\n");
     return -1;
 }
 
@@ -966,28 +963,30 @@ int main(int argc, char **argv)
     int res;
     const char *path = NULL;
     int i;
+    unsigned int uid = 0;
+    unsigned int gid = 0;
 
-    for (i = 1; i < argc; i++) {
-        char* arg = argv[i];
-        if (!path)
-            path = arg;
-        else if (uid == -1)
-            uid = strtoul(arg, 0, 10);
-        else if (gid == -1)
-            gid = strtoul(arg, 0, 10);
-        else {
-            ERROR("too many arguments\n");
-            return usage();
-        }
+
+    if (argc != 4) {
+      return usage();
     }
 
-    if (!path) {
-        ERROR("no path specified\n");
-        return usage();
+    path = argv[1];
+
+    char* endptr = NULL;
+    errno = 0;
+    uid = strtoul(argv[2], &endptr, 10);
+    if (*endptr != '\0' || errno != 0) {
+      ERROR("Invalid uid");
+      return usage();
     }
-    if (uid <= 0 || gid <= 0) {
-        ERROR("uid and gid must be nonzero\n");
-        return usage();
+
+    endptr = NULL;
+    errno = 0;
+    gid = strtoul(argv[3], &endptr, 10);
+    if (*endptr != '\0' || errno != 0) {
+      ERROR("Invalid gid");
+      return usage();
     }
 
         /* cleanup from previous instance, if necessary */

@@ -266,7 +266,7 @@ static const char _ok_resp[]    = "ok";
 
         /* Send the 'accept' request. */
         res = adb_write(fd, _accept_req, strlen(_accept_req));
-        if (res == strlen(_accept_req)) {
+        if ((size_t)res == strlen(_accept_req)) {
             /* Wait for the response. In the response we expect 'ok' on success,
              * or 'ko' on failure. */
             res = adb_read(fd, tmp, sizeof(tmp));
@@ -318,7 +318,7 @@ void local_init(int port)
             /* Running inside the device: use TCP socket as the transport. */
             func = server_socket_thread;
         }
-#endif !ADB_HOST
+#endif // !ADB_HOST
     }
 
     D("transport: local %s init\n", HOST ? "client" : "server");

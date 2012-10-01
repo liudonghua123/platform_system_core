@@ -55,7 +55,8 @@ TOOLS := \
 	nandread \
 	ionice \
 	touch \
-	lsof
+	lsof \
+	md5
 
 ifeq ($(HAVE_SELINUX),true)
 
@@ -82,6 +83,8 @@ LOCAL_SRC_FILES:= \
 	$(patsubst %,%.c,$(TOOLS))
 
 LOCAL_SHARED_LIBRARIES := libcutils libc libusbhost
+
+LOCAL_C_INCLUDES := bionic/libc/bionic
 
 ifeq ($(HAVE_SELINUX),true)
 

@@ -33,6 +33,7 @@
 #ifdef HAVE_SELINUX
 #include <selinux/selinux.h>
 #include <selinux/label.h>
+#include <selinux/android.h>
 #endif
 
 #include <private/android_filesystem_config.h>
@@ -52,7 +53,7 @@
 #define FIRMWARE_DIR2   "/vendor/firmware"
 
 #ifdef HAVE_SELINUX
-static struct selabel_handle *sehandle;
+extern struct selabel_handle *sehandle;
 #endif
 
 static int device_fd = -1;
@@ -63,6 +64,7 @@ struct uevent {
     const char *subsystem;
     const char *firmware;
     const char *partition_name;
+    const char *device_name;
     int partition_num;
     int major;
     int minor;
@@ -219,32 +221,6 @@ static void make_device(const char *path,
 #endif
 }
 
-
-static int make_dir(const char *path, mode_t mode)
-{
-    int rc;
-
-#ifdef HAVE_SELINUX
-    char *secontext = NULL;
-
-    if (sehandle) {
-        selabel_lookup(sehandle, &secontext, path, mode);
-        setfscreatecon(secontext);
-    }
-#endif
-
-    rc = mkdir(path, mode);
-
-#ifdef HAVE_SELINUX
-    if (secontext) {
-        freecon(secontext);
-        setfscreatecon(NULL);
-    }
-#endif
-    return rc;
-}
-
-
 static void add_platform_device(const char *name)
 {
     int name_len = strlen(name);
@@ -335,6 +311,7 @@ static void parse_event(const char *msg, struct uevent *uevent)
     uevent->minor = -1;
     uevent->partition_name = NULL;
     uevent->partition_num = -1;
+    uevent->device_name = NULL;
 
         /* currently ignoring SEQNUM */
     while(*msg) {
@@ -362,9 +339,12 @@ static void parse_event(const char *msg, struct uevent *uevent)
         } else if(!strncmp(msg, "PARTNAME=", 9)) {
             msg += 9;
             uevent->partition_name = msg;
+        } else if(!strncmp(msg, "DEVNAME=", 8)) {
+            msg += 8;
+            uevent->device_name = msg;
         }
 
-            /* advance to after the next \0 */
+        /* advance to after the next \0 */
         while(*msg++)
             ;
     }
@@ -579,24 +559,48 @@ static void handle_generic_device_event(struct uevent *uevent)
 
     if (!strncmp(uevent->subsystem, "usb", 3)) {
          if (!strcmp(uevent->subsystem, "usb")) {
-             /* This imitates the file system that would be created
-              * if we were using devfs instead.
-              * Minors are broken up into groups of 128, starting at "001"
-              */
-             int bus_id = uevent->minor / 128 + 1;
-             int device_id = uevent->minor % 128 + 1;
-             /* build directories */
-             make_dir("/dev/bus", 0755);
-             make_dir("/dev/bus/usb", 0755);
-             snprintf(devpath, sizeof(devpath), "/dev/bus/usb/%03d", bus_id);
-             make_dir(devpath, 0755);
-             snprintf(devpath, sizeof(devpath), "/dev/bus/usb/%03d/%03d", bus_id, device_id);
+            if (uevent->device_name) {
+                /*
+                 * create device node provided by kernel if present
+                 * see drivers/base/core.c
+                 */
+                char *p = devpath;
+                snprintf(devpath, sizeof(devpath), "/dev/%s", uevent->device_name);
+                /* skip leading /dev/ */
+                p += 5;
+                /* build directories */
+                while (*p) {
+                    if (*p == '/') {
+                        *p = 0;
+                        make_dir(devpath, 0755);
+                        *p = '/';
+                    }
+                    p++;
+                }
+             }
+             else {
+                 /* This imitates the file system that would be created
+                  * if we were using devfs instead.
+                  * Minors are broken up into groups of 128, starting at "001"
+                  */
+                 int bus_id = uevent->minor / 128 + 1;
+                 int device_id = uevent->minor % 128 + 1;
+                 /* build directories */
+                 make_dir("/dev/bus", 0755);
+                 make_dir("/dev/bus/usb", 0755);
+                 snprintf(devpath, sizeof(devpath), "/dev/bus/usb/%03d", bus_id);
+                 make_dir(devpath, 0755);
+                 snprintf(devpath, sizeof(devpath), "/dev/bus/usb/%03d/%03d", bus_id, device_id);
+             }
          } else {
              /* ignore other USB events */
              return;
          }
      } else if (!strncmp(uevent->subsystem, "graphics", 8)) {
          base = "/dev/graphics/";
+         make_dir(base, 0755);
+     } else if (!strncmp(uevent->subsystem, "drm", 3)) {
+         base = "/dev/dri/";
          make_dir(base, 0755);
      } else if (!strncmp(uevent->subsystem, "oncrpc", 6)) {
          base = "/dev/oncrpc/";
@@ -871,12 +875,10 @@ void device_init(void)
     struct stat info;
     int fd;
 #ifdef HAVE_SELINUX
-    struct selinux_opt seopts[] = {
-        { SELABEL_OPT_PATH, "/file_contexts" }
-    };
-
-    if (is_selinux_enabled() > 0)
-        sehandle = selabel_open(SELABEL_CTX_FILE, seopts, 1);
+    sehandle = NULL;
+    if (is_selinux_enabled() > 0) {
+        sehandle = selinux_android_file_context_handle();
+    }
 #endif
     /* is 64K enough? udev uses 16MB! */
     device_fd = uevent_open_socket(64*1024, true);

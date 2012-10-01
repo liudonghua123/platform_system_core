@@ -29,9 +29,11 @@
 #include <stdlib.h>
 #include <sys/mount.h>
 #include <sys/resource.h>
+#include <sys/wait.h>
 #include <linux/loop.h>
 #include <cutils/partition_utils.h>
 #include <sys/system_properties.h>
+#include <fs_mgr.h>
 
 #ifdef HAVE_SELINUX
 #include <selinux/selinux.h>
@@ -300,7 +302,7 @@ int do_mkdir(int nargs, char **args)
         mode = strtoul(args[2], 0, 8);
     }
 
-    ret = mkdir(args[1], mode);
+    ret = make_dir(args[1], mode);
     /* chmod in case the directory already exists */
     if (ret == -1 && errno == EEXIST) {
         ret = _chmod(args[1], mode);
@@ -433,70 +435,69 @@ int do_mount(int nargs, char **args)
         if (wait)
             wait_for_file(source, COMMAND_RETRY_TIMEOUT);
         if (mount(source, target, system, flags, options) < 0) {
-            /* If this fails, it may be an encrypted filesystem
-             * or it could just be wiped.  If wiped, that will be
-             * handled later in the boot process.
-             * We only support encrypting /data.  Check
-             * if we're trying to mount it, and if so,
-             * assume it's encrypted, mount a tmpfs instead.
-             * Then save the orig mount parms in properties
-             * for vold to query when it mounts the real
-             * encrypted /data.
-             */
-            if (!strcmp(target, DATA_MNT_POINT) && !partition_wiped(source)) {
-                const char *tmpfs_options;
-
-                tmpfs_options = property_get("ro.crypto.tmpfs_options");
-
-                if (mount("tmpfs", target, "tmpfs", MS_NOATIME | MS_NOSUID | MS_NODEV,
-                    tmpfs_options) < 0) {
-                    return -1;
-                }
-
-                /* Set the property that triggers the framework to do a minimal
-                 * startup and ask the user for a password
-                 */
-                property_set("ro.crypto.state", "encrypted");
-                property_set("vold.decrypt", "1");
-            } else {
-                return -1;
-            }
+            return -1;
         }
 
-        if (!strcmp(target, DATA_MNT_POINT)) {
-            char fs_flags[32];
-
-            /* Save the original mount options */
-            property_set("ro.crypto.fs_type", system);
-            property_set("ro.crypto.fs_real_blkdev", source);
-            property_set("ro.crypto.fs_mnt_point", target);
-            if (options) {
-                property_set("ro.crypto.fs_options", options);
-            }
-            snprintf(fs_flags, sizeof(fs_flags), "0x%8.8x", flags);
-            property_set("ro.crypto.fs_flags", fs_flags);
-        }
     }
 
 exit_success:
-    /* If not running encrypted, then set the property saying we are
-     * unencrypted, and also trigger the action for a nonencrypted system.
-     */
-    if (!strcmp(target, DATA_MNT_POINT)) {
-        const char *prop;
-
-        prop = property_get("ro.crypto.state");
-        if (! prop) {
-            prop = "notset";
-        }
-        if (strcmp(prop, "encrypted")) {
-            property_set("ro.crypto.state", "unencrypted");
-            action_for_each_trigger("nonencrypted", action_add_queue_tail);
-        }
-    }
-
     return 0;
 
+}
+
+int do_mount_all(int nargs, char **args)
+{
+    pid_t pid;
+    int ret = -1;
+    int child_ret = -1;
+    int status;
+    const char *prop;
+
+    if (nargs != 2) {
+        return -1;
+    }
+
+    /*
+     * Call fs_mgr_mount_all() to mount all filesystems.  We fork(2) and
+     * do the call in the child to provide protection to the main init
+     * process if anything goes wrong (crash or memory leak), and wait for
+     * the child to finish in the parent.
+     */
+    pid = fork();
+    if (pid > 0) {
+        /* Parent.  Wait for the child to return */
+        waitpid(pid, &status, 0);
+        if (WIFEXITED(status)) {
+            ret = WEXITSTATUS(status);
+        } else {
+            ret = -1;
+        }
+    } else if (pid == 0) {
+        /* child, call fs_mgr_mount_all() */
+        klog_set_level(6);  /* So we can see what fs_mgr_mount_all() does */
+        child_ret = fs_mgr_mount_all(args[1]);
+        if (child_ret == -1) {
+            ERROR("fs_mgr_mount_all returned an error\n");
+        }
+        exit(child_ret);
+    } else {
+        /* fork failed, return an error */
+        return -1;
+    }
+
+    /* ret is 1 if the device is encrypted, 0 if not, and -1 on error */
+    if (ret == 1) {
+        property_set("ro.crypto.state", "encrypted");
+        property_set("vold.decrypt", "1");
+    } else if (ret == 0) {
+        property_set("ro.crypto.state", "unencrypted");
+        /* If fs_mgr determined this is an unencrypted device, then trigger
+         * that action.
+         */
+        action_for_each_trigger("nonencrypted", action_add_queue_tail);
+    }
+
+    return ret;
 }
 
 int do_setcon(int nargs, char **args) {
@@ -735,26 +736,12 @@ int do_chmod(int nargs, char **args) {
 }
 
 int do_restorecon(int nargs, char **args) {
-#ifdef HAVE_SELINUX
-    char *secontext = NULL;
-    struct stat sb;
     int i;
 
-    if (is_selinux_enabled() <= 0 || !sehandle)
-        return 0;
-
     for (i = 1; i < nargs; i++) {
-        if (lstat(args[i], &sb) < 0)
+        if (restorecon(args[i]) < 0)
             return -errno;
-        if (selabel_lookup(sehandle, &secontext, args[i], sb.st_mode) < 0)
-            return -errno;
-        if (lsetfilecon(args[i], secontext) < 0) {
-            freecon(secontext);
-            return -errno;
-        }
-        freecon(secontext);
     }
-#endif
     return 0;
 }
 
@@ -812,6 +799,8 @@ int do_wait(int nargs, char **args)
 {
     if (nargs == 2) {
         return wait_for_file(args[1], COMMAND_RETRY_TIMEOUT);
-    }
-    return -1;
+    } else if (nargs == 3) {
+        return wait_for_file(args[1], atoi(args[2]));
+    } else
+        return -1;
 }
